@@ -12,21 +12,20 @@ use Illuminate\Support\Str;
 
 class ProductStoreController extends Controller
 {
-    /**
-     * API 1: Lấy danh sách tồn kho
-     */
+    // =========================================================================
+    // 1. GET LIST
+    // =========================================================================
     public function index(Request $request)
     {
         $query = ProductStore::join('products', 'product_stores.product_id', '=', 'products.id')
             ->select(
                 'product_stores.id as store_id', 
-                'product_stores.product_id',
-                'product_stores.qty',
-                'product_stores.price_root',
-                'product_stores.created_at',
-                'product_stores.updated_at',
-                'products.name as product_name',
-                'products.thumbnail as product_image',
+                'product_stores.product_id', 
+                'product_stores.qty', 
+                'product_stores.price_root', 
+                'product_stores.created_at', 
+                'products.name as product_name', 
+                'products.thumbnail as product_image', 
                 'products.status as product_status'
             );
 
@@ -42,72 +41,62 @@ class ProductStoreController extends Controller
             return $item;
         });
 
-        return response()->json([
-            'status' => true,
-            'data' => $inventory
-        ]);
+        return response()->json(['status' => true, 'data' => $inventory]);
     }
 
-    /**
-     * API 2: Nhập hàng mới (Create)
-     */
+    // =========================================================================
+    // 2. IMPORT (Nhập hàng mới -> Tăng kho -> Hiện sản phẩm)
+    // =========================================================================
     public function importGoods(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'product_id' => 'required|exists:products,id',
-            'qty_import' => 'required|integer|min:1',
+            'qty_import' => 'required|integer|min:1', // Nhập mới thì phải > 0
             'price_root' => 'required|numeric|min:0',
-        ], [
-            'product_id.exists' => 'Sản phẩm không tồn tại.',
-            'qty_import.min' => 'Số lượng nhập phải lớn hơn 0.',
         ]);
 
         if ($validator->fails()) {
             return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
         }
 
-        $userId = Auth::id() ?? 1;
-
         DB::beginTransaction();
         try {
-            // 1. Chỉ tạo lô hàng mới vào kho
+            // 1. Tạo lô hàng
             ProductStore::create([
                 'product_id' => $request->product_id,
                 'price_root' => $request->price_root,
                 'qty'        => $request->qty_import,
-                'created_by' => $userId,
-                'status'     => 1 // Status của lô hàng nhập (không phải status sản phẩm)
+                'created_by' => Auth::id() ?? 1,
+                'status'     => 1
             ]);
 
-            // [ĐÃ BỎ]: Logic tự động kích hoạt sản phẩm ($this->activateProduct...)
-            // Sản phẩm sẽ giữ nguyên trạng thái cũ (Active hoặc Inactive)
+            // 2. Cập nhật trạng thái sản phẩm
+            $this->updateProductStatusBasedOnStock($request->product_id);
 
             DB::commit();
             return response()->json([
                 'status' => true, 
-                'message' => "Đã nhập thêm lô hàng mới thành công!"
+                'message' => "Nhập kho thành công! Sản phẩm đã hiển thị trang chủ."
             ]);
 
         } catch (\Throwable $e) {
             DB::rollBack();
-            return response()->json(['status' => false, 'message' => 'Lỗi: ' . $e->getMessage()], 500);
+            return response()->json(['status' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    /**
-     * API 3: Cập nhật lô hàng (Update)
-     */
+    // =========================================================================
+    // 3. UPDATE (Cho phép chỉnh về 0 -> Nếu hết hàng thì Ẩn)
+    // =========================================================================
     public function update(Request $request, $id)
     {
-        // Tìm lô hàng theo store_id
         $store = ProductStore::find($id);
-
         if (!$store) {
             return response()->json(['status' => false, 'message' => 'Lô hàng không tồn tại'], 404);
         }
 
         $validator = Validator::make($request->all(), [
-            'qty'        => 'required|integer|min:1',
+            'qty'        => 'required|integer|min:0', // [QUAN TRỌNG] Cho phép nhập 0
             'price_root' => 'required|numeric|min:0',
         ]);
 
@@ -117,64 +106,92 @@ class ProductStoreController extends Controller
 
         DB::beginTransaction();
         try {
-            // Cập nhật thông tin lô hàng
+            // 1. Cập nhật lô hàng
             $store->update([
                 'qty' => $request->qty,
-                'price_root' => $request->price_root,
+                'price_root' => $request->price_root
             ]);
-
-            // [ĐÃ BỎ]: Logic kích hoạt lại sản phẩm. 
-            // Admin tự quản lý việc hiển thị bên trang Products.
+            
+            // 2. Kiểm tra tổng tồn kho để Ẩn/Hiện sản phẩm
+            $this->updateProductStatusBasedOnStock($store->product_id);
 
             DB::commit();
-
             return response()->json([
-                'status' => true,
-                'message' => 'Cập nhật lô hàng thành công',
+                'status' => true, 
+                'message' => 'Cập nhật thành công', 
                 'data' => $store
             ]);
 
         } catch (\Throwable $e) {
             DB::rollBack();
-            return response()->json(['status' => false, 'message' => 'Lỗi: ' . $e->getMessage()], 500);
+            return response()->json(['status' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    /**
-     * API 4: Xem chi tiết
-     */
-    public function show($storeId)
-    {
-        $store = ProductStore::with('product')->find($storeId);
-        if (!$store) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy'], 404);
-        }
-        return response()->json(['status' => true, 'data' => $store]);
-    }
-
-    /**
-     * API 5: Xóa lô hàng
-     */
-    public function destroy($storeId)
-    {
-        try {
-            $store = ProductStore::find($storeId);
+    // =========================================================================
+    // 4. DESTROY (Xóa lô hàng -> Kiểm tra lại kho để Ẩn/Hiện)
+    // =========================================================================
+    public function destroy($storeId) 
+    { 
+        DB::beginTransaction();
+        try { 
+            $store = ProductStore::find($storeId); 
             if (!$store) {
-                return response()->json(['status' => false, 'message' => 'Không tìm thấy'], 404);
+                return response()->json(['status' => false, 'message' => 'Not found'], 404);
             }
-
-            $store->delete();
             
-            return response()->json(['status' => true, 'message' => 'Đã xóa lô hàng thành công']);
+            $productId = $store->product_id; // Lưu lại ID sản phẩm trước khi xóa
+            $store->delete();
 
-        } catch (\Exception $e) {
-            return response()->json(['status' => false, 'message' => 'Lỗi: ' . $e->getMessage()], 500);
-        }
+            // Kiểm tra lại tồn kho sau khi xóa
+            $this->updateProductStatusBasedOnStock($productId);
+
+            DB::commit();
+            return response()->json(['status' => true, 'message' => 'Xóa thành công']); 
+        } catch(\Exception $e) {
+            DB::rollBack();
+            return response()->json(['status' => false, 'message' => $e->getMessage()], 500);
+        } 
     }
 
-    // --- HELPER FUNCTIONS ---
-    private function getValidImageUrl($path) {
-        if (!$path) return 'https://placehold.co/60';
-        return Str::startsWith($path, ['http', 'https']) ? $path : asset('storage/' . $path);
+    // =========================================================================
+    // HELPER FUNCTIONS
+    // =========================================================================
+    
+    public function show($storeId) { 
+        $store = ProductStore::with('product')->find($storeId); 
+        if(!$store) return response()->json(['status'=>false], 404); 
+        return response()->json(['status'=>true,'data'=>$store]); 
+    }
+
+    private function getValidImageUrl($path) { 
+        if (!$path) return 'https://placehold.co/60'; 
+        return Str::startsWith($path, ['http', 'https']) ? $path : asset('storage/' . $path); 
+    }
+
+    /**
+     * Hàm tính tổng tồn kho và cập nhật status cho Product
+     */
+    private function updateProductStatusBasedOnStock($productId)
+    {
+        // Tính tổng số lượng của sản phẩm này trong tất cả các lô
+        $totalQty = ProductStore::where('product_id', $productId)->sum('qty');
+        
+        $product = Product::find($productId);
+        if ($product) {
+            if ($totalQty > 0) {
+                // Nếu còn hàng -> Kích hoạt (Hiện)
+                if ($product->status == 0) {
+                    $product->status = 1;
+                    $product->save();
+                }
+            } else {
+                // Nếu hết hàng (Tổng = 0) -> Vô hiệu hóa (Ẩn)
+                if ($product->status == 1) {
+                    $product->status = 0;
+                    $product->save();
+                }
+            }
+        }
     }
 }

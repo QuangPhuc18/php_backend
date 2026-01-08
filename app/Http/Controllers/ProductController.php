@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\Product;
 use App\Models\ProductAttribute;
 use App\Models\ProductImage;
-use App\Models\Attribute;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Storage;
@@ -15,53 +14,87 @@ use Carbon\Carbon;
 
 class ProductController extends Controller
 {
-    // ================================
-    // GET LIST (Danh sách sản phẩm)
-    // ================================
-    public function index(Request $request) 
+    // =========================================================================
+    // 1. GET LIST (Hỗ trợ Lọc & Sắp xếp hoàn chỉnh)
+    // =========================================================================
+    public function index(Request $request)
     {
-        // Load thêm quan hệ 'images' để lấy ảnh phụ
         $query = Product::with(['product_attributes.attribute', 'images']);
-        
-        if ($request->search) {
-            $query->where('name', 'like', '%'.$request->search.'%');
+
+        // --- 1. Lọc theo Tên (Search) ---
+        if ($request->filled('search')) {
+            $query->where('name', 'like', '%' . $request->search . '%');
         }
-        
-        // Thêm filter theo category nếu cần (mở rộng)
-        if ($request->category_id) {
+
+        // --- 2. Lọc theo Danh mục (Category) ---
+        // Client gửi category_id (ví dụ: 1, 2, 3). Nếu là 'all' thì bỏ qua.
+        if ($request->filled('category_id') && $request->category_id !== 'all') {
             $query->where('category_id', $request->category_id);
         }
+
+        // --- 3. Lọc theo Giá (Price Range) ---
+        // Xử lý logic lọc giá: Dưới 30k, 30-70k...
+        if ($request->filled('price_min')) {
+            $query->where('price_buy', '>=', $request->price_min);
+        }
         
-        $query->orderBy('created_at', 'desc');
-        $limit = $request->input('limit', 10);
+        if ($request->filled('price_max')) {
+            $query->where('price_buy', '<=', $request->price_max);
+        }
+
+        // --- 4. Logic Phân Quyền (Admin/User) ---
+        // Admin (hoặc popup nhập kho) thấy tất cả. User chỉ thấy status = 1.
+        $isAdminRequest = $request->boolean('admin_view') || $request->boolean('for_import');
+        if (!$isAdminRequest) {
+            $query->where('status', 1);
+        }
+
+        // --- 5. Sắp xếp (Sort) ---
+        $sort = $request->input('sort', 'newest');
+        switch ($sort) {
+            case 'price-asc': // Giá: Thấp -> Cao
+                $query->orderBy('price_buy', 'asc');
+                break;
+                
+            case 'price-desc': // Giá: Cao -> Thấp
+                $query->orderBy('price_buy', 'desc');
+                break;
+                
+            case 'name': // Tên A-Z
+                $query->orderBy('name', 'asc');
+                break;
+                
+            case 'newest': // Mới nhất
+            default:
+                $query->orderBy('created_at', 'desc');
+                break;
+        }
+
+        // --- 6. Phân trang ---
+        $limit = $request->input('limit', 12);
         $products = $query->paginate($limit);
-        
-        // Format dữ liệu trả về
+
+        // --- 7. Format dữ liệu trả về ---
         $products->getCollection()->transform(function ($product) {
-            // 1. Xử lý Thumbnail
-            $product->image_url = $product->thumbnail
-                ? (filter_var($product->thumbnail, FILTER_VALIDATE_URL) 
-                    ? $product->thumbnail 
-                    : asset('storage/'.$product->thumbnail))
-                : null;
+            $product->image_url = $this->getValidImageUrl($product->thumbnail);
             
-            // 2. Format danh sách ảnh phụ (Gallery)
-            $product->gallery = $product->images->map(function($img) {
+            $product->gallery = $product->images->map(function ($img) {
                 return [
-                    'id' => $img->id,
-                    'url' => asset('storage/' . $img->image),
+                    'id' => $img->id, 
+                    'url' => asset('storage/' . $img->image), 
                     'alt' => $img->alt
                 ];
             });
 
-            // 3. Format attributes (nhóm theo attribute_id)
-            $product->formatted_attributes = $product->product_attributes->groupBy('attribute_id')->map(function($group) {
-                return [
-                    'attribute_name' => $group->first()->attribute->name ?? 'Unknown',
-                    'values' => $group->pluck('value')->toArray()
-                ];
-            })->values();
-            
+            $product->formatted_attributes = $product->product_attributes
+                ->groupBy('attribute_id')
+                ->map(function ($group) {
+                    return [
+                        'attribute_name' => $group->first()->attribute->name ?? 'Unknown',
+                        'values' => $group->pluck('value')->toArray()
+                    ];
+                })->values();
+
             return $product;
         });
 
@@ -78,91 +111,17 @@ class ProductController extends Controller
         ]);
     }
 
-    // ================================
-    // GET DETAIL (Chi tiết sản phẩm)
-    // ================================
-    public function show($id)
-    {
-        // 1. Lấy giờ Việt Nam để check Sale
-        $now = Carbon::now('Asia/Ho_Chi_Minh');
-
-        // 2. Query Sản phẩm kèm các quan hệ
-        $product = Product::with([
-            'product_attributes.attribute', 
-            'images', 
-            'sales' => function($q) use ($now) {
-                $q->where('status', 1)
-                  ->where('date_begin', '<=', $now)
-                  ->where('date_end', '>=', $now)
-                  ->orderBy('created_at', 'desc');
-            }
-        ])->find($id);
-
-        if (!$product) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy sản phẩm'], 404);
-        }
-
-        // 3. Xử lý Giá (Ưu tiên giá Sale nếu có)
-        $activeSale = $product->sales->first();
-        
-        $product->is_sale = false;
-        $product->price_final = $product->price_buy; // Mặc định là giá gốc
-
-        if ($activeSale) {
-            $product->is_sale = true;
-            $product->price_final = $activeSale->price_sale;
-            
-            // Tính % giảm giá để hiển thị Badge
-            $product->sale_info = [
-                'discount_percent' => $product->price_buy > 0 
-                    ? round((($product->price_buy - $activeSale->price_sale) / $product->price_buy) * 100) 
-                    : 0,
-                'end_date' => $activeSale->date_end
-            ];
-        }
-
-        // 4. Xử lý URL Ảnh
-        $product->image_url = $product->thumbnail 
-            ? (filter_var($product->thumbnail, FILTER_VALIDATE_URL) ? $product->thumbnail : asset('storage/' . $product->thumbnail)) 
-            : null;
-            
-        $product->gallery = $product->images->map(function($img) {
-            return ['id' => $img->id, 'url' => asset('storage/' . $img->image)];
-        });
-
-        // 5. Gom nhóm Attribute (Size/Màu) để Frontend render nút chọn
-        $product->grouped_attributes = $product->product_attributes
-            ->groupBy('attribute_id')
-            ->map(function($group) {
-                $attrModel = $group->first()->attribute;
-                return [
-                    'id' => $attrModel ? $attrModel->id : 0,
-                    'name' => ($attrModel && $attrModel->name) ? $attrModel->name : 'Size', 
-                    'values' => $group->pluck('value')->toArray() // VD: ['S', 'M', 'L']
-                ];
-            })->values();
-
-        return response()->json([
-            'status' => true,
-            'data' => $product
-        ]);
-    }
-
-    // ================================
-    // STORE (Thêm mới)
-    // ================================
+    // =========================================================================
+    // 2. STORE (Thêm mới - Viết rõ ràng)
+    // =========================================================================
     public function store(Request $request)
     {
+        // Validate dữ liệu đầu vào
         $validator = Validator::make($request->all(), [
             'name'             => 'required|string|max:255',
             'price_buy'        => 'required|numeric|min:0',
             'category_id'      => 'required|integer',
-            'content'          => 'nullable|string',
-            'description'      => 'nullable|string',
-            'thumbnail'        => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
-            'product_attributes' => 'nullable|string', // JSON string
-            'images'           => 'nullable|array',
-            'images.*'         => 'image|mimes:jpg,jpeg,png,webp|max:4096'
+            'thumbnail'        => 'nullable|image|max:4096',
         ]);
 
         if ($validator->fails()) {
@@ -171,13 +130,13 @@ class ProductController extends Controller
 
         DB::beginTransaction();
         try {
-            // 1. Upload thumbnail
+            // Upload Thumbnail
             $filePath = null;
             if ($request->hasFile('thumbnail')) {
                 $filePath = $request->file('thumbnail')->store('products', 'public');
             }
 
-            // 2. Tạo sản phẩm
+            // Tạo sản phẩm (Status = 0: Ẩn chờ nhập kho)
             $product = Product::create([
                 'name'        => $request->name,
                 'slug'        => $request->slug ?: Str::slug($request->name),
@@ -186,212 +145,144 @@ class ProductController extends Controller
                 'description' => $request->description,
                 'price_buy'   => $request->price_buy,
                 'thumbnail'   => $filePath,
-                'status'      => $request->status ?? 1,
+                'status'      => 0, 
             ]);
 
-            // 3. Xử lý lưu nhiều ảnh phụ (Gallery)
+            // Lưu ảnh Gallery
             if ($request->hasFile('images')) {
                 foreach ($request->file('images') as $file) {
-                    $galleryPath = $file->store('product_gallery', 'public');
                     ProductImage::create([
                         'product_id' => $product->id,
-                        'image'      => $galleryPath,
+                        'image'      => $file->store('product_gallery', 'public'),
                         'alt'        => $request->name
                     ]);
                 }
             }
 
-            // 4. Xử lý product_attributes (JSON)
+            // Lưu thuộc tính (Size, Màu...)
             if ($request->filled('product_attributes')) {
-                $attributesData = json_decode($request->product_attributes, true);
-                
-                if (is_array($attributesData)) {
-                    foreach ($attributesData as $attrGroup) {
-                        $attributeId = $attrGroup['attribute_id'] ?? null;
-                        $values = $attrGroup['values'] ?? [];
-                        
-                        if (!$attributeId || empty($values)) continue;
-                        
-                        foreach ($values as $value) {
-                            $value = trim($value);
-                            if ($value === '') continue;
-                            
-                            ProductAttribute::create([
-                                'product_id'   => $product->id,
-                                'attribute_id' => $attributeId,
-                                'value'        => $value
-                            ]);
-                        }
-                    }
-                }
+                $this->saveAttributes($product->id, $request->product_attributes);
             }
 
             DB::commit();
-
-            // Load lại quan hệ để trả về
-            $product->load(['product_attributes.attribute', 'images']);
-            $product->image_url = $filePath ? asset('storage/'.$filePath) : null;
-
+            
+            $product->image_url = $this->getValidImageUrl($product->thumbnail);
+            
             return response()->json([
-                'status' => true,
-                'message' => 'Thêm sản phẩm thành công',
-                'data' => $product
+                'status' => true, 
+                'data' => $product,
+                'message' => 'Thêm thành công (Sản phẩm đang ẩn)'
             ]);
 
         } catch (\Throwable $th) {
             DB::rollBack();
-            // Xóa ảnh thumbnail nếu lỡ upload mà lỗi DB
-            if (isset($filePath) && $filePath && Storage::disk('public')->exists($filePath)) {
-                Storage::disk('public')->delete($filePath);
-            }
-            return response()->json(['status' => false, 'message' => 'Lỗi hệ thống: ' . $th->getMessage()], 500);
+            return response()->json(['status' => false, 'message' => $th->getMessage()], 500);
         }
     }
 
-    // ================================
-    // UPDATE (Cập nhật)
-    // ================================
+    // =========================================================================
+    // 3. UPDATE (Cập nhật - Viết rõ ràng & Fix lỗi Content null)
+    // =========================================================================
     public function update(Request $request, $id)
     {
         $product = Product::find($id);
         if (!$product) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy sản phẩm'], 404);
-        }
-
-        $validator = Validator::make($request->all(), [
-            'name'             => 'nullable|string|max:255',
-            'price_buy'        => 'nullable|numeric|min:0',
-            'category_id'      => 'nullable|integer',
-            'content'          => 'nullable|string',
-            'description'      => 'nullable|string',
-            'thumbnail'        => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
-            'product_attributes' => 'nullable|string',
-            'images'           => 'nullable|array',
-            'images.*'         => 'image|mimes:jpg,jpeg,png,webp|max:4096'
-        ]);
-       
-        if ($validator->fails()) {
-            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+            return response()->json(['status' => false, 'message' => 'Not Found'], 404);
         }
 
         DB::beginTransaction();
         try {
-            // 1. Upload thumbnail mới (nếu có)
+            // Xử lý dữ liệu cập nhật
+            $dataToUpdate = $request->except(['thumbnail', '_method', 'product_attributes', 'images']);
+            
+            // Fix lỗi SQL: Nếu content là null -> chuyển thành chuỗi rỗng
+            if (array_key_exists('content', $dataToUpdate) && is_null($dataToUpdate['content'])) {
+                $dataToUpdate['content'] = '';
+            }
+
+            // Upload thumbnail mới nếu có
             if ($request->hasFile('thumbnail')) {
-                if ($product->thumbnail && Storage::disk('public')->exists($product->thumbnail)) {
+                // Xóa ảnh cũ
+                if ($product->thumbnail) {
                     Storage::disk('public')->delete($product->thumbnail);
                 }
                 $product->thumbnail = $request->file('thumbnail')->store('products', 'public');
             }
 
-            // 2. Cập nhật thông tin cơ bản
-            $dataToUpdate = $request->except(['thumbnail', '_method', 'product_attributes', 'images']);
-            
-            // Xử lý field content nếu gửi null hoặc empty
-            if (array_key_exists('content', $dataToUpdate) && $dataToUpdate['content'] === null) {
-                $dataToUpdate['content'] = '';
-            } elseif (!array_key_exists('content', $dataToUpdate) && $request->has('content')) {
-                 $dataToUpdate['content'] = '';
-            }
-
             $product->update($dataToUpdate);
 
-            // 3. Thêm ảnh phụ mới (Cộng dồn vào ảnh cũ)
+            // Thêm ảnh Gallery mới
             if ($request->hasFile('images')) {
                 foreach ($request->file('images') as $file) {
-                    $galleryPath = $file->store('product_gallery', 'public');
                     ProductImage::create([
                         'product_id' => $product->id,
-                        'image'      => $galleryPath,
+                        'image'      => $file->store('product_gallery', 'public'),
                         'alt'        => $product->name
                     ]);
                 }
             }
 
-            // 4. Cập nhật attributes (Xóa cũ, tạo mới)
+            // Cập nhật thuộc tính
             if ($request->filled('product_attributes')) {
                 ProductAttribute::where('product_id', $product->id)->delete();
-                
-                $attributesData = json_decode($request->product_attributes, true);
-                if (is_array($attributesData)) {
-                    foreach ($attributesData as $attrGroup) {
-                        $attributeId = $attrGroup['attribute_id'] ?? null;
-                        $values = $attrGroup['values'] ?? [];
-                        
-                        if (!$attributeId || empty($values)) continue;
-                        
-                        foreach ($values as $value) {
-                            $value = trim($value);
-                            if ($value === '') continue;
-                            
-                            ProductAttribute::create([
-                                'product_id'   => $product->id,
-                                'attribute_id' => $attributeId,
-                                'value'        => $value
-                            ]);
-                        }
-                    }
-                }
+                $this->saveAttributes($product->id, $request->product_attributes);
             }
 
             DB::commit();
-
-            $product->load(['product_attributes.attribute', 'images']);
-            $product->image_url = $product->thumbnail ? asset('storage/' . $product->thumbnail) : null;
-
-            return response()->json([
-                'status' => true,
-                'message' => 'Cập nhật thành công',
-                'data' => $product
-            ]);
+            return response()->json(['status' => true, 'data' => $product]);
 
         } catch (\Throwable $th) {
             DB::rollBack();
-            return response()->json(['status' => false, 'message' => 'Lỗi hệ thống: ' . $th->getMessage()], 500);
+            return response()->json(['status' => false, 'message' => $th->getMessage()], 500);
         }
     }
 
-    // ================================
-    // DESTROY (Xóa)
-    // ================================
+    // =========================================================================
+    // 4. Các hàm phụ trợ
+    // =========================================================================
     public function destroy($id)
     {
-        $product = Product::with('images')->find($id);
-        
-        if (!$product) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy'], 404);
-        }
-
-        DB::beginTransaction();
         try {
-            // 1. Xóa file thumbnail
-            if ($product->thumbnail && Storage::disk('public')->exists($product->thumbnail)) {
-                Storage::disk('public')->delete($product->thumbnail);
-            }
+            $product = Product::find($id);
+            if (!$product) return response()->json(['status' => false], 404);
+            $product->delete();
+            return response()->json(['status' => true]);
+        } catch (\Exception $e) {
+            return response()->json(['status' => false], 500);
+        }
+    }
 
-            // 2. Xóa tất cả file ảnh phụ
-            foreach ($product->images as $img) {
-                if ($img->image && Storage::disk('public')->exists($img->image)) {
-                    Storage::disk('public')->delete($img->image);
+    public function show($id)
+    {
+        $product = Product::with(['product_attributes.attribute', 'images'])->find($id);
+        if (!$product) return response()->json(['status' => false], 404);
+        
+        $product->image_url = $this->getValidImageUrl($product->thumbnail);
+        return response()->json(['status' => true, 'data' => $product]);
+    }
+
+    private function getValidImageUrl($path)
+    {
+        if (!$path) return 'https://placehold.co/60';
+        return Str::startsWith($path, ['http', 'https']) ? $path : asset('storage/' . $path);
+    }
+
+    private function saveAttributes($pid, $json)
+    {
+        $data = json_decode($json, true);
+        if (is_array($data)) {
+            foreach ($data as $group) {
+                if (empty($group['values'])) continue;
+                foreach ($group['values'] as $val) {
+                    if (trim($val) != '') {
+                        ProductAttribute::create([
+                            'product_id' => $pid,
+                            'attribute_id' => $group['attribute_id'] ?? null,
+                            'value' => trim($val)
+                        ]);
+                    }
                 }
             }
-            
-            // 3. Xóa record ảnh phụ trong DB
-            ProductImage::where('product_id', $id)->delete();
-
-            // 4. Xóa attributes
-            ProductAttribute::where('product_id', $product->id)->delete();
-            
-            // 5. Xóa sản phẩm
-            $product->delete(); 
-
-            DB::commit();
-
-            return response()->json(['status' => true, 'message' => 'Xóa thành công']);
-
-        } catch (\Throwable $th) {
-            DB::rollBack();
-            return response()->json(['status' => false, 'message' => 'Lỗi hệ thống: ' . $th->getMessage()], 500);
         }
     }
 }

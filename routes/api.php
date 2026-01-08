@@ -23,7 +23,7 @@ use Illuminate\Support\Facades\Route;
 Route::apiResource('products', ProductController::class);
 Route::apiResource('categories', CategoryController::class);
 Route::post('categories/{id}', [CategoryController::class, 'update']); // Fix cho FormData
-Route::apiResource('user', UserController::class);
+Route::apiResource('/user', UserController::class);
 Route::apiResource('banners', BannerController::class);
 Route::apiResource('contacts', ContactController::class);
 Route::post('contacts/{id}/reply', [ContactController::class, 'reply']);
@@ -32,8 +32,8 @@ Route::apiResource('posts', PostController::class);
 Route::apiResource('orders', OrderController::class); // Dùng 1 cái orders thôi
 Route::post('orders/{id}/status', [OrderController::class, 'updateStatus']);
 Route::apiResource('attribute', AttributeController::class);
-
-
+Route::get('/users', [UserController::class, 'index']);
+Route::post('/users', [UserController::class, 'store']);
 // --- 2. PRODUCT SALES (QUẢN LÝ KHUYẾN MÃI) ---
 // URL: /api/sales/...
 Route::prefix('sales')->group(function () {
