@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth; // Đã thêm dòng này để sửa lỗi Auth
 
 class PostController extends Controller
 {
@@ -43,7 +44,10 @@ class PostController extends Controller
 
             // Filter by topic_id
             if ($request->filled('topic_id')) {
-                $query->where('topic_id', $request->topic_id);
+                // Hỗ trợ lọc 'all' từ frontend
+                if ($request->topic_id !== 'all') {
+                    $query->where('topic_id', $request->topic_id);
+                }
             }
 
             // Filter by post_type
@@ -60,20 +64,10 @@ class PostController extends Controller
             if ($request->filled('search')) {
                 $searchTerm = trim($request->search);
                 
-                // Try FULLTEXT search first
-                try {
-                    $query->whereRaw(
-                        "MATCH(title, content, description) AGAINST(? IN BOOLEAN MODE)", 
-                        [$searchTerm . '*']
-                    );
-                } catch (\Throwable $e) {
-                    // Fallback to LIKE search if FULLTEXT not available
-                    $query->where(function ($q) use ($searchTerm) {
-                        $q->where('title', 'like', "%{$searchTerm}%")
-                          ->orWhere('content', 'like', "%{$searchTerm}%")
-                          ->orWhere('description', 'like', "%{$searchTerm}%");
-                    });
-                }
+                $query->where(function ($q) use ($searchTerm) {
+                    $q->where('title', 'like', "%{$searchTerm}%")
+                      ->orWhere('description', 'like', "%{$searchTerm}%");
+                });
             }
 
             // Order by latest
@@ -109,8 +103,7 @@ class PostController extends Controller
 
             return response()->json([
                 'status' => false,
-                'message' => 'Lỗi khi lấy danh sách bài viết',
-                'error' => $e->getMessage()
+                'message' => 'Lỗi khi lấy danh sách bài viết: ' . $e->getMessage(),
             ], 500);
         }
     }
@@ -139,15 +132,9 @@ class PostController extends Controller
             ], 200);
 
         } catch (\Throwable $e) {
-            Log::error('Error fetching post:', [
-                'id' => $id,
-                'error' => $e->getMessage()
-            ]);
-
             return response()->json([
                 'status' => false,
-                'message' => 'Lỗi khi lấy chi tiết bài viết',
-                'error' => $e->getMessage()
+                'message' => 'Lỗi server: ' . $e->getMessage()
             ], 500);
         }
     }
@@ -162,7 +149,7 @@ class PostController extends Controller
             'topic_id'    => 'nullable|integer',
             'title'       => 'required|string|max:255',
             'slug'        => 'nullable|string|max:255|unique:posts,slug',
-            'image'       => 'nullable|image|mimes:jpg,jpeg,png,webp,gif|max:4096',
+            'image'       => 'nullable|image|mimes:jpg,jpeg,png,webp,gif|max:10240', // Max 10MB
             'content'     => 'nullable|string',
             'description' => 'nullable|string',
             'post_type'   => 'nullable|string|max:100',
@@ -177,16 +164,17 @@ class PostController extends Controller
         }
 
         DB::beginTransaction();
+        $imagePath = null;
+
         try {
             // Handle image upload
-            $imagePath = null;
             if ($request->hasFile('image')) {
                 $imagePath = $request->file('image')->store('posts', 'public');
             }
 
             // Generate slug if not provided
             $slug = $request->input('slug');
-            if (!$slug) {
+            if (empty($slug)) {
                 $slug = $this->generateUniqueSlug($request->title);
             }
 
@@ -202,10 +190,18 @@ class PostController extends Controller
                 'status'      => $request->status ?? 1,
             ];
 
-            // Add created_by if column exists
-            $table = (new Post())->getTable();
-            if (Schema::hasColumn($table, 'created_by')) {
-                $data['created_by'] = $request->user()?->id ?? null;
+            // Add created_by safe check
+            // Kiểm tra Auth::id() trước
+            $userId = Auth::id();
+            if (!$userId) {
+                // Fallback nếu không đăng nhập (ví dụ gán cho admin ID = 1)
+                // Hoặc bỏ qua nếu cột nullable
+                $userId = 1; 
+            }
+            
+            // Chỉ thêm vào data nếu cột tồn tại trong bảng
+            if (Schema::hasColumn('posts', 'created_by')) {
+                $data['created_by'] = $userId;
             }
 
             // Create post
@@ -216,8 +212,6 @@ class PostController extends Controller
             // Add image_url
             $post->image_url = $this->getImageUrl($post->image);
 
-            Log::info('Post created successfully:', ['id' => $post->id]);
-
             return response()->json([
                 'status' => true, 
                 'message' => 'Tạo bài viết thành công', 
@@ -227,8 +221,8 @@ class PostController extends Controller
         } catch (\Throwable $e) {
             DB::rollBack();
             
-            // Remove uploaded file if exists
-            if (!empty($imagePath) && Storage::disk('public')->exists($imagePath)) {
+            // Xóa ảnh nếu đã upload nhưng lỗi DB
+            if ($imagePath && Storage::disk('public')->exists($imagePath)) {
                 Storage::disk('public')->delete($imagePath);
             }
 
@@ -239,8 +233,7 @@ class PostController extends Controller
 
             return response()->json([
                 'status' => false,
-                'message' => 'Lỗi khi tạo bài viết',
-                'error' => $e->getMessage()
+                'message' => 'Lỗi khi tạo bài viết: ' . $e->getMessage(),
             ], 500);
         }
     }
@@ -250,7 +243,6 @@ class PostController extends Controller
      */
     public function update(Request $request, $id)
     {
-        // Find post
         $post = Post::find($id);
         if (!$post) {
             return response()->json([
@@ -259,12 +251,11 @@ class PostController extends Controller
             ], 404);
         }
 
-        // Validation
         $validator = Validator::make($request->all(), [
             'topic_id'    => 'nullable|integer',
             'title'       => 'nullable|string|max:255',
             'slug'        => 'nullable|string|max:255|unique:posts,slug,' . $id,
-            'image'       => 'nullable|image|mimes:jpg,jpeg,png,webp,gif|max:6090',
+            'image'       => 'nullable|image|mimes:jpg,jpeg,png,webp,gif|max:10240',
             'content'     => 'nullable|string',
             'description' => 'nullable|string',
             'post_type'   => 'nullable|string|max:100',
@@ -286,40 +277,32 @@ class PostController extends Controller
                 if ($post->image && Storage::disk('public')->exists($post->image)) {
                     Storage::disk('public')->delete($post->image);
                 }
-                
-                // Upload new image
                 $post->image = $request->file('image')->store('posts', 'public');
             }
 
-            // Auto-generate slug if title changed but slug not provided
+            // Auto-generate slug if title changed
             if ($request->filled('title') && !$request->filled('slug')) {
-                $slug = $this->generateUniqueSlug($request->title, $post->id);
-                $request->merge(['slug' => $slug]);
+                $post->slug = $this->generateUniqueSlug($request->title, $post->id);
             }
 
-            // Update only provided fields
+            // Update fields
             $fillableFields = ['topic_id', 'title', 'slug', 'content', 'description', 'post_type', 'status'];
             foreach ($fillableFields as $field) {
-                if ($request->has($field) && $request->input($field) !== null) {
+                if ($request->has($field)) {
                     $post->{$field} = $request->input($field);
                 }
             }
 
-            // Update updated_by if column exists
-            $table = $post->getTable();
-            if (Schema::hasColumn($table, 'updated_by')) {
-                $post->updated_by = $request->user()?->id ?? null;
+            // Update updated_by
+            if (Schema::hasColumn('posts', 'updated_by')) {
+                $post->updated_by = Auth::id() ?? 1;
             }
 
             $post->save();
-
             DB::commit();
 
-            // Refresh and add image_url
             $post->refresh();
             $post->image_url = $this->getImageUrl($post->image);
-
-            Log::info('Post updated successfully:', ['id' => $post->id]);
 
             return response()->json([
                 'status' => true, 
@@ -329,18 +312,8 @@ class PostController extends Controller
 
         } catch (\Throwable $e) {
             DB::rollBack();
-            
-            Log::error('Error updating post:', [
-                'id' => $id,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ]);
-
-            return response()->json([
-                'status' => false,
-                'message' => 'Lỗi khi cập nhật bài viết',
-                'error' => $e->getMessage()
-            ], 500);
+            Log::error('Error updating post: ' . $e->getMessage());
+            return response()->json(['status' => false, 'message' => 'Lỗi cập nhật'], 500);
         }
     }
 
@@ -349,65 +322,91 @@ class PostController extends Controller
      */
     public function destroy($id)
     {
-        // Find post
         $post = Post::find($id);
         if (!$post) {
-            return response()->json([
-                'status' => false, 
-                'message' => 'Không tìm thấy bài viết'
-            ], 404);
+            return response()->json(['status' => false, 'message' => 'Not found'], 404);
         }
 
-        DB::beginTransaction();
         try {
-            // Delete image if exists
             if ($post->image && Storage::disk('public')->exists($post->image)) {
                 Storage::disk('public')->delete($post->image);
             }
-
-            // Delete post
             $post->delete();
+            return response()->json(['status' => true, 'message' => 'Deleted successfully'], 200);
+        } catch (\Throwable $e) {
+            return response()->json(['status' => false, 'message' => 'Error deleting'], 500);
+        }
+    }
 
-            DB::commit();
+    // --- CÁC HÀM API MỚI CHO TRANG CHI TIẾT ---
 
-            Log::info('Post deleted successfully:', ['id' => $id]);
+   public function getPostBySlug($slug)
+    {
+        try {
+            // 1. Tìm bài viết
+            $post = Post::where('slug', $slug)->where('status', 1)->first();
 
+            if (!$post) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Bài viết không tồn tại',
+                    'data' => null
+                ], 404);
+            }
+
+            // 2. Tạo full link ảnh (image_url)
+            $post->image_url = $this->getImageUrl($post->image);
+
+            // 3. Trả về JSON đúng cấu trúc
             return response()->json([
-                'status' => true, 
-                'message' => 'Xóa bài viết thành công'
+                'status' => true,
+                'message' => 'Lấy chi tiết bài viết thành công',
+                'data' => $post // Trả về object bài viết vào trong key 'data'
             ], 200);
 
         } catch (\Throwable $e) {
-            DB::rollBack();
-            
-            Log::error('Error deleting post:', [
-                'id' => $id,
-                'error' => $e->getMessage()
-            ]);
-
             return response()->json([
-                'status' => false, 
-                'message' => 'Lỗi khi xóa bài viết', 
-                'error' => $e->getMessage()
+                'status' => false,
+                'message' => 'Lỗi server: ' . $e->getMessage()
             ], 500);
         }
     }
 
     /**
-     * Helper: Get full image URL
+     * API: Lấy bài viết liên quan
      */
+    public function getRelatedPosts($topicId, $excludeId)
+    {
+        try {
+            $posts = Post::where('topic_id', $topicId)
+                ->where('id', '<>', $excludeId)
+                ->where('status', 1)
+                ->orderBy('created_at', 'desc')
+                ->limit(3)
+                ->get();
+
+            // Xử lý ảnh cho từng bài
+            $posts->transform(function ($post) {
+                $post->image_url = $this->getImageUrl($post->image);
+                return $post;
+            });
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Lấy bài liên quan thành công',
+                'data' => $posts // Trả về mảng bài viết
+            ], 200);
+
+        } catch (\Throwable $e) {
+            return response()->json(['status' => false, 'data' => []]);
+        }
+    }
+
+    // Helper xử lý ảnh
     protected function getImageUrl(?string $imagePath): ?string
     {
-        if (!$imagePath) {
-            return null;
-        }
-
-        // If already full URL
-        if (filter_var($imagePath, FILTER_VALIDATE_URL)) {
-            return $imagePath;
-        }
-
-        // Generate storage URL
+        if (!$imagePath) return null;
+        if (filter_var($imagePath, FILTER_VALIDATE_URL)) return $imagePath;
         return asset('storage/' . $imagePath);
     }
 }

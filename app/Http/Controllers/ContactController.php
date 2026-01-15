@@ -5,94 +5,132 @@ namespace App\Http\Controllers;
 use App\Models\Contact;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Auth;
 
 class ContactController extends Controller
 {
-    // LIST + SEARCH + PAGINATION
+    /**
+     * Lấy danh sách liên hệ (Khớp cấu trúc JSON bạn yêu cầu)
+     */
     public function index(Request $request)
     {
         $query = Contact::query();
 
-        // Include replies param: if not provided, still treat reply_id = 0 as root.
-        $includeReplies = (bool) $request->input('include_replies', false);
+        // 1. Chỉ lấy các tin nhắn gốc (reply_id = 0 hoặc NULL)
+        $query->where(function ($q) {
+            $q->where('reply_id', 0)
+              ->orWhereNull('reply_id');
+        });
 
-        if (!$includeReplies) {
-            // treat NULL OR 0 as "no reply" (root messages)
-            $query->where(function ($q) {
-                $q->whereNull('reply_id')
-                  ->orWhere('reply_id', 0);
-            });
-        }
-
-        if ($request->search) {
+        // 2. Tìm kiếm (nếu có)
+        if ($request->filled('search')) {
             $s = $request->search;
             $query->where(function ($q) use ($s) {
                 $q->where('name', 'like', "%{$s}%")
                   ->orWhere('email', 'like', "%{$s}%")
-                  ->orWhere('phone', 'like', "%{$s}%")
                   ->orWhere('content', 'like', "%{$s}%");
             });
         }
 
+        // 3. Sắp xếp mới nhất trước
         $query->orderBy('created_at', 'desc');
 
-        $limit = (int) $request->input('limit', 10);
-        $items = $query->with('replies')->paginate($limit);
+        // 4. Load quan hệ replies để có mảng "replies": [] trong JSON
+        $query->with('replies');
 
+        // 5. Phân trang
+        $limit = (int) $request->input('limit', 10);
+        $contacts = $query->paginate($limit);
+
+        // 6. Trả về cấu trúc JSON chuẩn
         return response()->json([
             'status' => true,
             'message' => 'Lấy danh sách liên hệ thành công',
-            'data' => $items->items(),
+            'data' => $contacts->items(), // Mảng dữ liệu chính
             'meta' => [
-                'total' => $items->total(),
-                'per_page' => $items->perPage(),
-                'current_page' => $items->currentPage(),
-                'last_page' => $items->lastPage(),
+                'total' => $contacts->total(),
+                'per_page' => $contacts->perPage(),
+                'current_page' => $contacts->currentPage(),
+                'last_page' => $contacts->lastPage(),
             ],
-        ]);
+        ], 200);
     }
 
-    // SHOW DETAIL (including replies)
-    public function show($id)
-    {
-        $item = Contact::with('replies')->find($id);
-        if (!$item) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy liên hệ'], 404);
-        }
-
-        return response()->json(['status' => true, 'message' => 'Lấy chi tiết thành công', 'data' => $item]);
-    }
-
-    // STORE (public contact submission)
+    /**
+     * Gửi liên hệ mới (Khắc phục lỗi created_by null)
+     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'user_id' => 'nullable|integer',
             'name'    => 'required|string|max:255',
             'email'   => 'required|email|max:255',
-            'phone'   => 'nullable|string|max:50',
+            'phone'   => 'nullable|string|max:20',
             'content' => 'required|string',
-            'status'  => 'nullable|integer|in:0,1',
+        ], [
+            'name.required' => 'Vui lòng nhập họ tên',
+            'email.required' => 'Vui lòng nhập email',
+            'content.required' => 'Vui lòng nhập nội dung',
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+            return response()->json([
+                'status' => false, 
+                'message' => 'Dữ liệu không hợp lệ',
+                'errors' => $validator->errors()
+            ], 422);
         }
 
-        $contact = Contact::create([
-            'user_id' => $request->user_id ?? null,
-            'name'    => $request->name,
-            'email'   => $request->email,
-            'phone'   => $request->phone,
-            'content' => $request->content,
-            'created_by' => $request->user()?->id ?? null,
-            'status'  => $request->status ?? 1,
-        ]);
+        try {
+            // Lấy ID người dùng hiện tại, nếu không đăng nhập thì gán mặc định là 0 (hoặc 1 tùy logic của bạn để tránh lỗi SQL)
+            // Nếu bạn muốn khách vãng lai cũng gửi được, hãy set cứng giá trị này nếu Auth::id() null
+            $creatorId = Auth::id() ?? 0; 
 
-        return response()->json(['status' => true, 'message' => 'Gửi liên hệ thành công', 'data' => $contact], 201);
+            $contact = Contact::create([
+                'user_id'    => Auth::id() ?? null, // Có thể null nếu khách vãng lai
+                'name'       => $request->name,
+                'email'      => $request->email,
+                'phone'      => $request->phone,
+                'content'    => $request->content,
+                'reply_id'   => 0, // Mặc định là tin nhắn gốc
+                'status'     => 1, // 1: Chưa xử lý
+                'created_by' => $creatorId, // FIX LỖI: Không để null
+            ]);
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Gửi liên hệ thành công',
+                'data' => $contact
+            ], 201);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Lỗi server: ' . $e->getMessage()
+            ], 500);
+        }
     }
 
-    // REPLY to a contact (admin action) — create a reply record linked to original contact
+    /**
+     * Xem chi tiết
+     */
+    public function show($id)
+    {
+        $contact = Contact::with('replies')->find($id);
+        
+        if (!$contact) {
+            return response()->json(['status' => false, 'message' => 'Không tìm thấy liên hệ'], 404);
+        }
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Lấy chi tiết thành công',
+            'data' => $contact
+        ]);
+    }
+
+    /**
+     * Trả lời liên hệ (Admin)
+     */
     public function reply(Request $request, $id)
     {
         $parent = Contact::find($id);
@@ -108,33 +146,45 @@ class ContactController extends Controller
             return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
         }
 
+        // Lấy ID Admin đang đăng nhập
+        $adminId = Auth::id() ?? 1; 
+
         $reply = Contact::create([
-            'user_id' => $parent->user_id,
-            'name'    => 'Admin Reply',
-            'email'   => $parent->email,
-            'phone'   => null,
-            'content' => $request->content,
-            'reply_id' => $parent->id,
-            'created_by' => $request->user()?->id ?? null,
-            'status'  => 1,
+            'user_id'    => $parent->user_id, // Gán cùng user với tin nhắn gốc
+            'name'       => 'Admin Support',
+            'email'      => $parent->email,
+            'phone'      => null,
+            'content'    => $request->content,
+            'reply_id'   => $parent->id, // Link với tin nhắn gốc
+            'status'     => 2, // Đã trả lời
+            'created_by' => $adminId,
         ]);
 
-        return response()->json(['status' => true, 'message' => 'Trả lời thành công', 'data' => $reply]);
+        // Cập nhật trạng thái tin nhắn gốc thành đã xử lý
+        $parent->status = 2; 
+        $parent->save();
+
+        return response()->json([
+            'status' => true, 
+            'message' => 'Trả lời thành công', 
+            'data' => $reply
+        ]);
     }
 
-    // DELETE
+    /**
+     * Xóa liên hệ
+     */
     public function destroy($id)
     {
-        $item = Contact::find($id);
-        if (!$item) {
-            return response()->json(['status' => false, 'message' => 'Không tìm thấy liên hệ'], 404);
+        $contact = Contact::find($id);
+        if (!$contact) {
+            return response()->json(['status' => false, 'message' => 'Không tìm thấy'], 404);
         }
 
-        // delete replies of this parent
-        Contact::where('reply_id', $item->id)->delete();
+        // Xóa cả các câu trả lời liên quan
+        Contact::where('reply_id', $id)->delete();
+        $contact->delete();
 
-        $item->delete();
-
-        return response()->json(['status' => true, 'message' => 'Xóa liên hệ thành công']);
+        return response()->json(['status' => true, 'message' => 'Xóa thành công']);
     }
 }

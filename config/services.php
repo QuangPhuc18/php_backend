@@ -34,5 +34,12 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+     'vnpay' => [
+        'tmn_code' => env('VNPAY_TMN_CODE', 'AXBHS2RO'),
+        'hash_secret' => env('VNPAY_HASH_SECRET', 'STT6HSSKMIU05LV76G57HYK6W9D2VKSA
+'),
+        'url' => env('VNPAY_URL', 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
+        'return_url' => env('VNPAY_RETURN_URL', 'http://localhost:3000/checkout/result'),
+    ],
 
 ];

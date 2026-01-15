@@ -17,12 +17,13 @@ class Menu extends Model
         'created_by', 'updated_by', 'status'
     ];
     // Menu cha
-public function parent() {
-    return $this->belongsTo(Menu::class, 'parent_id');
-}
+public function children()
+    {
+        return $this->hasMany(Menu::class, 'parent_id', 'id')->orderBy('sort_order', 'asc');
+    }
 
-// Các menu con
-public function children() {
-    return $this->hasMany(Menu::class, 'parent_id');
-}
-}
+    // Quan hệ ngược: Menu con thuộc về menu cha
+    public function parent()
+    {
+        return $this->belongsTo(Menu::class, 'parent_id', 'id');
+    }}
