@@ -10,6 +10,7 @@ use App\Http\Controllers\PostController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\ProductSaleController;
 use App\Http\Controllers\ProductStoreController;
+use App\Http\Controllers\TopicController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Route;
@@ -105,3 +106,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/my-orders', [OrderController::class, 'myOrders']);
     Route::post('/my-orders/{id}/cancel', [OrderController::class, 'cancelOrder']);
 });
+Route::apiResource('topics', TopicController::class);
+// Thêm dòng này:
+// Route::get('/login', function () {
+//     return response()->json([
+//         'status' => false,
+//         'message' => 'Bạn chưa đăng nhập hoặc Token không hợp lệ (Unauthorized).'
+//     ], 401);
+// })->name('login'); // 👈 Quan trọng: phải đặt tên là 'login'\
+Route::get('/email/verify/{id}', [UserController::class, 'verifyEmail'])->name('auth.verify');

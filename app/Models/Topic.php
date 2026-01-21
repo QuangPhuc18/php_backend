@@ -9,7 +9,7 @@ class Topic extends Model
 {
     use HasFactory;
 
-    protected $table = 'topic';
+    protected $table = 'topics';
 
     protected $fillable = [
         'name', 'slug', 'sort_order', 'description', 

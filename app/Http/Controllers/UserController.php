@@ -52,13 +52,14 @@ class UserController extends Controller
     }
 
     // ================================
-    // 2. STORE / REGISTER (Giữ nguyên + Note gửi mail)
+    // 2. STORE / REGISTER (Cập nhật validate Gmail)
     // ================================
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'name'     => 'required|string|min:3|max:255',
-            'email'    => 'required|string|email|max:255|unique:users,email',
+            // Thêm rule: ends_with:@gmail.com
+            'email'    => 'required|string|email|max:255|unique:users,email|ends_with:@gmail.com',
             'phone'    => 'required|string|max:20|unique:users,phone',
             'username' => 'required|string|max:255|unique:users,username',
             'password' => 'required|string|min:6',
@@ -66,10 +67,11 @@ class UserController extends Controller
             'status'   => 'nullable|integer|in:0,1',
             'avatar'   => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096'
         ], [
-            'email.unique' => 'Email đã tồn tại trong hệ thống.',
-            'phone.unique' => 'Số điện thoại đã tồn tại.',
+            'email.unique'    => 'Email đã tồn tại trong hệ thống.',
+            'email.ends_with' => 'Email phải là tài khoản Gmail (@gmail.com).', // Thông báo lỗi tùy chỉnh
+            'phone.unique'    => 'Số điện thoại đã tồn tại.',
             'username.unique' => 'Tên đăng nhập đã tồn tại.',
-            'password.min' => 'Mật khẩu phải từ 6 ký tự trở lên.'
+            'password.min'    => 'Mật khẩu phải từ 6 ký tự trở lên.'
         ]);
 
         if ($validator->fails()) {
@@ -95,10 +97,10 @@ class UserController extends Controller
                 'roles'      => $request->roles ?? 'customer',
                 'avatar'     => $avatarPath,
                 'created_by' => 1,
-                'status'     => $request->status ?? 1, // Mặc định 1 (Active) hoặc 0 nếu cần xác thực email
+                'status'     => $request->status ?? 1, 
             ]);
 
-            // TODO: Gửi email xác thực ở đây (Sử dụng Mail::to($user)->send(new VerifyEmail($user)))
+            // TODO: Gửi email xác thực ở đây
             
             $user->avatar_url = $this->getAvatarUrl($avatarPath);
 
@@ -117,7 +119,7 @@ class UserController extends Controller
     }
 
     // ================================
-    // 3. UPDATE USER (Admin update user khác - Giữ nguyên)
+    // 3. UPDATE USER (Admin update user khác - Cập nhật validate Gmail)
     // ================================
     public function update(Request $request, $id)
     {
@@ -128,13 +130,16 @@ class UserController extends Controller
 
         $validator = Validator::make($request->all(), [
             'name'     => 'nullable|string|min:3|max:255',
-            'email'    => 'nullable|email|max:255|unique:users,email,' . $id,
+            // Thêm rule: ends_with:@gmail.com
+            'email'    => 'nullable|email|max:255|ends_with:@gmail.com|unique:users,email,' . $id,
             'phone'    => 'nullable|string|max:20|unique:users,phone,' . $id,
             'username' => 'nullable|string|max:255|unique:users,username,' . $id,
             'password' => 'nullable|string|min:6',
             'roles'    => 'nullable|in:admin,customer',
             'status'   => 'nullable|integer|in:0,1',
             'avatar'   => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096'
+        ], [
+            'email.ends_with' => 'Email phải là tài khoản Gmail (@gmail.com).'
         ]);
 
         if ($validator->fails()) {
@@ -184,11 +189,10 @@ class UserController extends Controller
     }
 
     // ================================
-    // 5. LOGIN (Cập nhật logic Email/Phone/Username)
+    // 5. LOGIN (Giữ nguyên)
     // ================================
     public function login(Request $request)
     {
-        // Cho phép nhận key 'login' hoặc 'email' từ frontend
         $loginInput = $request->input('login') ?? $request->input('email');
         $password = $request->input('password');
 
@@ -196,7 +200,6 @@ class UserController extends Controller
              return response()->json(['status' => false, 'message' => 'Vui lòng nhập tài khoản và mật khẩu'], 422);
         }
 
-        // Xác định loại đăng nhập: Email, Phone hay Username
         $fieldType = 'username';
         if (filter_var($loginInput, FILTER_VALIDATE_EMAIL)) {
             $fieldType = 'email';
@@ -204,7 +207,6 @@ class UserController extends Controller
             $fieldType = 'phone';
         }
 
-        // 1. Kiểm tra User có tồn tại không
         $user = User::where($fieldType, $loginInput)->first();
 
         if (!$user || !Hash::check($password, $user->password)) {
@@ -214,7 +216,6 @@ class UserController extends Controller
             ], 401);
         }
 
-        // 2. Kiểm tra trạng thái kích hoạt
         if ($user->status != 1) {
             return response()->json([
                 'status' => false,
@@ -222,7 +223,6 @@ class UserController extends Controller
             ], 403);
         }
 
-        // 3. Tạo Token
         $token = $user->createToken('auth_token')->plainTextToken;
         $user->avatar_url = $this->getAvatarUrl($user->avatar);
 
@@ -254,7 +254,7 @@ class UserController extends Controller
     }
 
     // ================================
-    // 7. GET PROFILE (Đã đăng nhập)
+    // 7. GET PROFILE (Giữ nguyên)
     // ================================
     public function profile(Request $request)
     {
@@ -268,25 +268,27 @@ class UserController extends Controller
     }
 
     // ================================
-    // 8. UPDATE PROFILE (Người dùng tự sửa thông tin)
+    // 8. UPDATE PROFILE (Cập nhật validate Gmail)
     // ================================
     public function updateProfile(Request $request)
     {
-        $user = $request->user(); // Lấy user từ token
+        $user = $request->user(); 
 
         $validator = Validator::make($request->all(), [
             'name'    => 'required|string|min:3|max:255',
-            'email'   => 'required|email|unique:users,email,' . $user->id,
+            // Thêm rule: ends_with:@gmail.com
+            'email'   => 'required|email|ends_with:@gmail.com|unique:users,email,' . $user->id,
             'phone'   => 'required|string|unique:users,phone,' . $user->id,
-            'address' => 'nullable|string|max:255', // Thêm địa chỉ nếu cần
+            'address' => 'nullable|string|max:255', 
             'avatar'  => 'nullable|image|max:4096'
+        ], [
+            'email.ends_with' => 'Email phải là tài khoản Gmail (@gmail.com).'
         ]);
 
         if ($validator->fails()) {
             return response()->json(['status' => false, 'message' => 'Dữ liệu không hợp lệ', 'errors' => $validator->errors()], 422);
         }
 
-        // Xử lý Avatar
         if ($request->hasFile('avatar')) {
             if ($user->avatar && Storage::disk('public')->exists($user->avatar)) {
                 Storage::disk('public')->delete($user->avatar);
@@ -305,13 +307,13 @@ class UserController extends Controller
     }
 
     // ================================
-    // 9. CHANGE PASSWORD (Đổi mật khẩu)
+    // 9. CHANGE PASSWORD (Giữ nguyên)
     // ================================
     public function changePassword(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'current_password' => 'required',
-            'new_password'     => 'required|min:6|confirmed', // Cần field new_password_confirmation
+            'new_password'     => 'required|min:6|confirmed', 
         ]);
 
         if ($validator->fails()) {
@@ -320,7 +322,6 @@ class UserController extends Controller
 
         $user = $request->user();
 
-        // Kiểm tra mật khẩu cũ
         if (!Hash::check($request->current_password, $user->password)) {
             return response()->json(['status' => false, 'message' => 'Mật khẩu hiện tại không đúng'], 400);
         }
